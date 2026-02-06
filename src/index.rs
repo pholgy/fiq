@@ -136,11 +136,17 @@ impl TrigramIndex {
         Some(results)
     }
 
-    /// Check if the index is still fresh (root dir hasn't been modified since build).
+    /// Check if the index is still fresh.
+    ///
+    /// Uses a 1-hour TTL rather than root dir mtime, because directories like
+    /// $HOME get modified constantly by unrelated processes, which would
+    /// invalidate the index on nearly every query.
+    /// Use the `build_index` MCP tool for explicit rebuilds when needed.
     pub fn is_fresh(&self) -> bool {
-        match std::fs::metadata(&self.root).and_then(|m| m.modified()) {
-            Ok(mtime) => mtime <= self.built_at,
-            Err(_) => false,
+        const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+        match SystemTime::now().duration_since(self.built_at) {
+            Ok(age) => age < MAX_AGE,
+            Err(_) => true, // clock went backwards, treat as fresh
         }
     }
 
