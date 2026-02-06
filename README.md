@@ -6,11 +6,22 @@ Scan directories, find duplicates, search files, and organize them into folders.
 
 ## Install
 
-Requires Rust 1.85+ (edition 2024).
+**macOS / Linux:**
 
 ```bash
-cargo build --release
-# binary at target/release/fiq
+curl -fsSL https://raw.githubusercontent.com/pholgy/fiq/main/install.sh | sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/pholgy/fiq/main/install.ps1 | iex
+```
+
+**From source** (requires Rust 1.85+):
+
+```bash
+cargo install --git https://github.com/pholgy/fiq.git
 ```
 
 ## Usage
@@ -63,25 +74,35 @@ Collision modes: `rename` (default), `skip`, `overwrite`.
 
 ## MCP Server
 
-Run as a JSON-RPC 2.0 server over stdio for AI tool use:
+fiq runs as a JSON-RPC 2.0 server over stdio, exposing four tools: `scan_stats`, `find_duplicates`, `search_files`, `organize_files`.
+
+### Claude Code
 
 ```bash
-fiq --mcp
+claude mcp add fiq -- fiq --mcp
 ```
 
-Exposes four tools: `scan_stats`, `find_duplicates`, `search_files`, `organize_files`.
+### Claude Desktop
 
-Add to your MCP client config (e.g. Claude Desktop):
+Add to your config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
 
 ```json
 {
   "mcpServers": {
     "fiq": {
-      "command": "/path/to/fiq",
+      "command": "fiq",
       "args": ["--mcp"]
     }
   }
 }
+```
+
+### Other MCP clients
+
+Any client that supports stdio transport works:
+
+```bash
+fiq --mcp
 ```
 
 ## Configuration
