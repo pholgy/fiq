@@ -1,5 +1,11 @@
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod cli;
 mod commands;
+mod index;
+mod index_cache;
 mod mcp;
 mod output;
 mod scanner;

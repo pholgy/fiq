@@ -2,12 +2,11 @@ use std::fs::File;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use globset::{Glob, GlobMatcher};
 use memmap2::Mmap;
 use rayon::prelude::*;
 use serde::Serialize;
 
-use crate::scanner::{FileInfo, scan_directory};
+use crate::scanner::{FileInfo, scan_directory_filtered, scan_directory_names_only};
 
 const MMAP_THRESHOLD: u64 = 128 * 1024;
 
@@ -140,33 +139,49 @@ pub struct SearchParams<'a> {
 }
 
 pub fn run_search(params: &SearchParams<'_>) -> SearchResult {
+    run_search_with_cache(params, false)
+}
+
+pub fn run_search_with_cache(params: &SearchParams<'_>, use_memory_cache: bool) -> SearchResult {
     let dir = Path::new(params.directory);
-    let files = scan_directory(dir, params.recursive);
+
+    // Determine if we need metadata (size/date/content filters)
+    let needs_metadata = params.min_size.is_some()
+        || params.max_size.is_some()
+        || params.newer.is_some()
+        || params.older.is_some()
+        || params.content_query.is_some();
+
+    // Try trigram index fast path for name-only searches
+    if !needs_metadata
+        && let Some(name_pattern) = params.name_pattern
+        && let Some(result) = crate::index_cache::try_indexed_search(
+            dir,
+            name_pattern,
+            params.recursive,
+            use_memory_cache,
+        )
+    {
+        return result;
+    }
+
+    // Full scan path
+    let files = if needs_metadata {
+        scan_directory_filtered(dir, params.recursive, params.name_pattern)
+    } else {
+        scan_directory_names_only(dir, params.recursive, params.name_pattern)
+    };
     let files_scanned = files.len();
 
-    // Build filters
-    let glob_matcher: Option<GlobMatcher> = params
-        .name_pattern
-        .and_then(|p| Glob::new(p).ok().map(|g| g.compile_matcher()));
-
+    // Build remaining filters (name already applied by scanner)
     let min_bytes = params.min_size.and_then(parse_size);
     let max_bytes = params.max_size.and_then(parse_size);
     let newer_time = params.newer.and_then(parse_time);
     let older_time = params.older.and_then(parse_time);
 
-    // Apply filters in order of cheapness: name → size → date → content
+    // Apply filters: size → date → content (name already done)
     let filtered = files
         .iter()
-        .filter(|f| {
-            // Name filter
-            if let Some(ref matcher) = glob_matcher {
-                let file_name = f.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !matcher.is_match(file_name) {
-                    return false;
-                }
-            }
-            true
-        })
         .filter(|f| {
             // Size filters
             if let Some(min) = min_bytes
