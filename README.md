@@ -118,52 +118,83 @@ FIQ_THREADS=2 fiq stats ~/projects   # fewer threads to reduce CPU usage
 
 ## Performance
 
-- Persistent trigram index for name searches — first query builds the index, every query after is instant
-- jemalloc allocator for better multi-threaded performance
-- Parallel directory walking via `ignore` crate's work-stealing thread pool
-- Two-phase duplicate detection: size grouping then parallel blake3 hashing
-- Memory-mapped I/O for files >128KB (hashing and content search)
-- Parallel content search via rayon
+All benchmarks on macOS (Apple Silicon), ~1.9 million files in `$HOME`, warm filesystem cache. fd 10.3, ripgrep 14.1, fiq 0.1.0. All tools configured with `--no-ignore --hidden` / equivalent for a fair comparison.
 
-### Benchmarks
+### Name search
 
-Tested on macOS (Apple Silicon), ~1.9 million files in `$HOME`. All tools configured to skip gitignore/hidden filtering for a fair comparison.
+fiq builds a trigram index on first run, then uses it for all subsequent queries. fd and ripgrep walk the entire directory tree every time.
 
-**Name search: `*.rs` (19,191 matches)**
+| Pattern | Matches | fd | ripgrep | fiq (indexed) | fiq speedup |
+|---------|--------:|---:|--------:|--------------:|------------:|
+| `*.rs` | 19,191 | 14.07s | 10.90s | **0.49s** | 22-29x |
+| `*.test.js` | 713 | 11.79s | 12.02s | **0.40s** | 29-30x |
+| `*.json` | 70,737 | 10.20s | 12.64s | **0.45s** | 23-28x |
+| `*.py` | 105,891 | 11.14s | 11.09s | **0.65s** | 17x |
+| `*.tsx` | 603 | 11.22s | 16.93s | **0.44s** | 26-38x |
+| `*.c` | 1,480 | 10.52s | 12.57s | 11.71s | no index* |
 
-| Tool | Time | Notes |
-|------|------|-------|
-| fd | 11.0s | full directory walk every time |
-| ripgrep `--files` | 12.8s | full directory walk every time |
-| fiq (1st run) | 15.6s | full walk + builds trigram index |
-| fiq (2nd run) | **0.29s** | reads cached index, skips walk entirely |
+*`*.c` has only 2 literal characters — not enough for a trigram. Falls back to full directory walk, where fiq is ~15% slower than fd.
 
-**Name search: `*.test.js` (720 matches, same cached index)**
+### Where fiq is slower
 
-| Tool | Time |
-|------|------|
-| fd | ~10s |
-| ripgrep | ~10s |
-| fiq | **0.27s** |
+Being straight: fiq's raw directory walk (no index) is slower than both fd and ripgrep.
 
-**Full walk, no index possible: `*.c` (pattern too short for trigrams)**
+| Operation | fd | ripgrep | fiq |
+|-----------|---:|--------:|----:|
+| Full walk, name filter `*.c` | **10.5s** | 12.6s | 11.7s |
+| Count all files in `$HOME` | **10.7s** | — | 20.5s |
+| Content search `TODO` (project dir) | — | **0.30s** | 1.45s |
 
-| Tool | Time |
-|------|------|
-| fd | 9.9s |
-| ripgrep | 10.8s |
-| fiq | 14.7s |
+fiq's full walk is ~15% slower than fd. For stats (`fiq stats`) it's ~2x slower because it collects metadata (size, dates, extensions) for every file. ripgrep is significantly faster than fiq for content search — it has years of SIMD-optimized string matching that fiq doesn't try to replicate.
 
-**Bottom line:** fiq's raw walk speed is ~50% slower than fd. But the trigram index makes repeated name searches 30-40x faster than anything that walks the filesystem every time. The index is cached on disk (`~/Library/Caches/fiq/` on macOS) and kept in memory during MCP sessions, so the cost is paid once.
+### Where fiq wins
 
-### Trigram Index
+The trigram index changes the game for repeated name searches. This is the typical MCP server scenario — an AI assistant searching the same codebase many times in one session.
 
-fiq builds a trigram index over file names the first time you search a directory with a name pattern that has 3+ literal characters (e.g. `*.rs`, `*.test.js`, `foo*bar`). Patterns that are too short for trigrams (e.g. `*.c`, `*`) fall back to a full directory walk.
+**5 sequential name searches across 1.9M files:**
+
+| Tool | `*.rs` | `*.test.js` | `*.json` | `*.tsx` | `*.toml` | Total |
+|------|-------:|------------:|---------:|--------:|---------:|------:|
+| fd | 15.76s | 14.54s | 12.59s | 17.30s | 8.52s | **68.95s** |
+| fiq | 0.32s | 0.30s | 0.43s | 0.28s | 0.29s | **1.91s** |
+
+**36x faster total.** Each fd/ripgrep query re-walks the entire filesystem. fiq looks up a cached index and returns in under half a second.
+
+### First run cost
+
+The first search for a directory builds the index. This is slower than a plain walk because it also constructs and saves the trigram data:
+
+| | Time |
+|--|-----:|
+| fiq first search (walk + build index) | ~16s |
+| fiq second search (cached index) | ~0.3s |
+| fd (every search) | ~11s |
+
+You pay once, then every subsequent query is instant.
+
+### How the trigram index works
+
+fiq decomposes file names into 3-byte substrings (trigrams). Given `*.test.js`, it extracts the literal `.test.js` and generates trigrams like `.te`, `tes`, `est`, `st.`, `t.j`, `.js`. At query time, it intersects the posting lists for each trigram and verifies candidates against the full glob.
+
+Patterns need at least 3 consecutive literal characters to use the index. These work: `*.rs`, `*.test.js`, `foo*bar`. These fall back to a full walk: `*.c` (2 chars), `*` (no literals).
 
 The index is:
-- **Cached on disk** — persists across CLI invocations (1-hour TTL)
-- **Cached in memory** — stays alive during an MCP session for sub-second queries
-- **Rebuildable** — use the `build_index` MCP tool or just delete `~/Library/Caches/fiq/`
+- **Cached on disk** — persists across CLI invocations (1-hour TTL, stored in `~/Library/Caches/fiq/` on macOS)
+- **Cached in memory** — stays alive during an MCP server session for sub-second queries
+- **Rebuildable** — use the `build_index` MCP tool or delete the cache directory
+
+### What makes fiq fast (and not fast)
+
+**Fast:**
+- jemalloc allocator (better multi-threaded allocation than system malloc)
+- Trigram index eliminates filesystem walks for repeated name searches
+- Skip metadata syscalls when only file names are needed
+- Parallel blake3 hashing with memory-mapped I/O for duplicate detection
+
+**Not fast (compared to fd/ripgrep):**
+- Raw directory walking — fd has more walker optimizations
+- Content search — ripgrep has SIMD-accelerated string matching
+- Stats collection — fiq stats every file for size/date/extension breakdown
 
 ## License
 
