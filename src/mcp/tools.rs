@@ -134,6 +134,20 @@ pub fn tool_definitions() -> Value {
                     },
                     "required": ["directory"]
                 }
+            },
+            {
+                "name": "build_index",
+                "description": "Build or rebuild the trigram file name index for a directory. The index accelerates subsequent search_files name queries from seconds to milliseconds. The index is cached in memory (for this session) and on disk (~/.cache/fiq/).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "directory": {
+                            "type": "string",
+                            "description": "Directory path to index"
+                        }
+                    },
+                    "required": ["directory"]
+                }
             }
         ]
     })

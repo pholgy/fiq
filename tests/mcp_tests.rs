@@ -111,6 +111,7 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"find_duplicates"));
     assert!(tool_names.contains(&"search_files"));
     assert!(tool_names.contains(&"organize_files"));
+    assert!(tool_names.contains(&"build_index"));
 }
 
 #[test]
