@@ -74,7 +74,7 @@ Collision modes: `rename` (default), `skip`, `overwrite`.
 
 ## MCP Server
 
-fiq runs as a JSON-RPC 2.0 server over stdio, exposing four tools: `scan_stats`, `find_duplicates`, `search_files`, `organize_files`.
+fiq runs as a JSON-RPC 2.0 server over stdio, exposing five tools: `scan_stats`, `find_duplicates`, `search_files`, `organize_files`, and `build_index`.
 
 ### Claude Code
 
@@ -118,11 +118,52 @@ FIQ_THREADS=2 fiq stats ~/projects   # fewer threads to reduce CPU usage
 
 ## Performance
 
+- Persistent trigram index for name searches — first query builds the index, every query after is instant
+- jemalloc allocator for better multi-threaded performance
 - Parallel directory walking via `ignore` crate's work-stealing thread pool
 - Two-phase duplicate detection: size grouping then parallel blake3 hashing
 - Memory-mapped I/O for files >128KB (hashing and content search)
 - Parallel content search via rayon
-- Respects `.gitignore` rules (skips ignored files automatically)
+
+### Benchmarks
+
+Tested on macOS (Apple Silicon), ~1.9 million files in `$HOME`. All tools configured to skip gitignore/hidden filtering for a fair comparison.
+
+**Name search: `*.rs` (19,191 matches)**
+
+| Tool | Time | Notes |
+|------|------|-------|
+| fd | 11.0s | full directory walk every time |
+| ripgrep `--files` | 12.8s | full directory walk every time |
+| fiq (1st run) | 15.6s | full walk + builds trigram index |
+| fiq (2nd run) | **0.29s** | reads cached index, skips walk entirely |
+
+**Name search: `*.test.js` (720 matches, same cached index)**
+
+| Tool | Time |
+|------|------|
+| fd | ~10s |
+| ripgrep | ~10s |
+| fiq | **0.27s** |
+
+**Full walk, no index possible: `*.c` (pattern too short for trigrams)**
+
+| Tool | Time |
+|------|------|
+| fd | 9.9s |
+| ripgrep | 10.8s |
+| fiq | 14.7s |
+
+**Bottom line:** fiq's raw walk speed is ~50% slower than fd. But the trigram index makes repeated name searches 30-40x faster than anything that walks the filesystem every time. The index is cached on disk (`~/Library/Caches/fiq/` on macOS) and kept in memory during MCP sessions, so the cost is paid once.
+
+### Trigram Index
+
+fiq builds a trigram index over file names the first time you search a directory with a name pattern that has 3+ literal characters (e.g. `*.rs`, `*.test.js`, `foo*bar`). Patterns that are too short for trigrams (e.g. `*.c`, `*`) fall back to a full directory walk.
+
+The index is:
+- **Cached on disk** — persists across CLI invocations (1-hour TTL)
+- **Cached in memory** — stays alive during an MCP session for sub-second queries
+- **Rebuildable** — use the `build_index` MCP tool or just delete `~/Library/Caches/fiq/`
 
 ## License
 
